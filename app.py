@@ -1,48 +1,42 @@
 """
 WCU Smart Meal - Backend API (Flask + SQLite)
-Termux ላይ Node.js ሳያስፈልግ ይሰራል - Python ብቻ በቂ ነው።
+Termux / Python Environment
 
-ማስጀመሪያ (Termux):
-    pkg install python -y
+Commands:
     pip install flask flask-cors
     python app.py
-
-ሰርቨሩ በ http://127.0.0.1:5000 ላይ ይነሳል።
-ስልክዎ/ብራውዘር ላይ ለመክፈት: http://127.0.0.1:5000
-(thelast_connected.html ከ app.py ጋር በአንድ ፎልደር ውስጥ ካስቀመጡ፣
-ይህን URL ብቻ ገብተው ሙሉ app ይከፈትልዎታል።)
 """
 
-import sqlite3
-import json
 import os
+import json
+import sqlite3
 from datetime import datetime
 from flask import Flask, request, jsonify, g, send_from_directory
 from flask_cors import CORS
 
 DB_PATH = "wcu_meal.db"
-ADMIN_PASSWORD = "admin123"  # <-- ይህን ይቀይሩ
-FRONTEND_FILE = "thelast_connected.html"  # ከ app.py ጋር በአንድ ፎልደር ውስጥ ያስቀምጡ
+ADMIN_PASSWORD = "admin123"
 
 app = Flask(__name__)
 CORS(app)
 
 
-# ---------- FRONTEND ----------
+# ---------- FRONTEND ROUTE ----------
 
 @app.route("/")
 def serve_frontend():
     folder = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.exists(os.path.join(folder, FRONTEND_FILE)):
-        return (
-            f"{FRONTEND_FILE} አልተገኘም። እባክዎ thelast_connected.html ን "
-            f"ከ app.py ጋር በተመሳሳይ ፎልደር ውስጥ ያስቀምጡ።",
-            404,
-        )
-    return send_from_directory(folder, FRONTEND_FILE)
+    for file_name in ["index.html", "thelast_connected.html"]:
+        if os.path.exists(os.path.join(folder, file_name)):
+            return send_from_directory(folder, file_name)
+    return (
+        "HTML ፋይል አልተገኘም። እባክዎ index.html ወይም thelast_connected.html ን "
+        "ከ app.py ጋር በተመሳሳይ ፎልደር ውስጥ ያስቀምጡ።",
+        404,
+    )
 
 
-# ---------- DATABASE ----------
+# ---------- DATABASE HELPERS ----------
 
 def get_db():
     if "db" not in g:
@@ -101,7 +95,6 @@ def init_db():
         )
     """)
 
-    # ነባሪ የምግብ ሰዓት
     defaults = [
         ("breakfast", "07:00", "09:30"),
         ("lunch", "12:00", "14:30"),
@@ -136,46 +129,53 @@ def student_to_dict(row):
     }
 
 
-# ---------- STUDENT: REGISTER / LOGIN ----------
+# ---------- STUDENT LOGIN / REGISTER ----------
 
 @app.route("/api/student/login", methods=["POST"])
 def student_login():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
+    action = data.get("action", "login")
     name = (data.get("name") or "").strip()
     student_id = (data.get("id") or "").strip()
     department = (data.get("department") or "").strip()
     pin = (data.get("pin") or "").strip()
 
-    if not (name and student_id and department and pin):
-        return jsonify({"ok": False, "message": "እባክዎ ሁሉንም መረጃ ያስገቡ።"}), 400
+    if not student_id or not pin:
+        return jsonify({"ok": False, "message": "እባክዎ Student ID እና PIN ያስገቡ።"}), 400
 
     if len(pin) != 4 or not pin.isdigit():
         return jsonify({"ok": False, "message": "PIN በትክክል 4 አሃዝ መሆን አለበት።"}), 400
 
     db = get_db()
-    row = db.execute(
-        "SELECT * FROM students WHERE id=?", (student_id,)
-    ).fetchone()
+    row = db.execute("SELECT * FROM students WHERE id=?", (student_id,)).fetchone()
 
-    if row is None:
+    if action == "register":
+        if not name or not department:
+            return jsonify({"ok": False, "message": "እባክዎ ሙሉ ስምና ዲፓርትመንት ያስገቡ።"}), 400
+
+        if row is not None:
+            return jsonify({"ok": False, "message": "ይህ Student ID ቀድሞ ተመዝግቧል። ይግቡ።"}), 400
+
         joined = datetime.now().strftime("%Y-%m-%d")
         db.execute(
             """INSERT INTO students
-               (id, name, department, pin, status, joined,
-                meal_breakfast, meal_lunch, meal_dinner)
-               VALUES (?,?,?,?, 'pending', ?, 0,0,0)""",
+               (id, name, department, pin, status, joined, meal_breakfast, meal_lunch, meal_dinner)
+               VALUES (?, ?, ?, ?, 'pending', ?, 0, 0, 0)""",
             (student_id, name, department, pin, joined),
         )
         db.commit()
-        row = db.execute(
-            "SELECT * FROM students WHERE id=?", (student_id,)
-        ).fetchone()
+
+        new_row = db.execute("SELECT * FROM students WHERE id=?", (student_id,)).fetchone()
         return jsonify({
             "ok": True,
             "isNew": True,
-            "student": student_to_dict(row),
+            "student": student_to_dict(new_row),
             "message": "ምዝገባዎ ተሳክቷል። Admin ማረጋገጫ ይጠብቁ።",
         })
+
+    # Login flow
+    if row is None:
+        return jsonify({"ok": False, "message": "ይህ Student ID አልተመዘገበም። አዲስ ተመዝገቡ።"}), 404
 
     if row["pin"] != pin:
         return jsonify({"ok": False, "message": "የተሳሳተ PIN!"}), 401
@@ -192,14 +192,14 @@ def student_login():
 
 @app.route("/api/admin/login", methods=["POST"])
 def admin_login():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     password = data.get("password") or ""
     if password == ADMIN_PASSWORD:
         return jsonify({"ok": True})
     return jsonify({"ok": False, "message": "የተሳሳተ Admin password!"}), 401
 
 
-# ---------- STUDENTS LIST / APPROVE / REJECT ----------
+# ---------- STUDENT MANAGEMENT ----------
 
 @app.route("/api/students", methods=["GET"])
 def list_students():
@@ -242,7 +242,7 @@ def get_meal_times():
 
 @app.route("/api/mealtimes", methods=["POST"])
 def set_meal_times():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     db = get_db()
     for meal in ("breakfast", "lunch", "dinner"):
         if meal in data:
@@ -266,13 +266,13 @@ def is_meal_time_allowed(db, meal):
     return start <= now <= end
 
 
-# ---------- QR SCAN ----------
+# ---------- QR SCANNER ----------
 
 MEAL_NAMES = {"breakfast": "🌅 ቁርስ", "lunch": "☀️ ምሳ", "dinner": "🌙 እራት"}
 
 @app.route("/api/scan", methods=["POST"])
 def scan_qr():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     qr_raw = data.get("qrData")
     meal_type = data.get("mealType")
 
@@ -331,7 +331,7 @@ def scan_qr():
     })
 
 
-# ---------- MEALS / STATS ----------
+# ---------- STATS / ANALYTICS ----------
 
 @app.route("/api/meals", methods=["GET"])
 def get_meals():
@@ -344,9 +344,7 @@ def get_meals():
 
     total_scans = db.execute("SELECT COUNT(*) c FROM scan_logs").fetchone()["c"]
     total_students = db.execute("SELECT COUNT(*) c FROM students").fetchone()["c"]
-    pending = db.execute(
-        "SELECT COUNT(*) c FROM students WHERE status='pending'"
-    ).fetchone()["c"]
+    pending = db.execute("SELECT COUNT(*) c FROM students WHERE status='pending'").fetchone()["c"]
 
     return jsonify({
         "ok": True,
@@ -357,11 +355,11 @@ def get_meals():
     })
 
 
-# ---------- WASTE ----------
+# ---------- WASTE CALCULATOR ----------
 
 @app.route("/api/waste", methods=["POST"])
 def calculate_waste():
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
     prepared = float(data.get("prepared", 0))
     wasted = float(data.get("wasted", 0))
 
@@ -372,9 +370,7 @@ def calculate_waste():
     percentage = round((wasted / prepared) * 100, 1)
 
     db = get_db()
-    db.execute(
-        "UPDATE settings SET value=? WHERE key='waste_rate'", (str(percentage),)
-    )
+    db.execute("UPDATE settings SET value=? WHERE key='waste_rate'", (str(percentage),))
     db.commit()
 
     return jsonify({
@@ -391,9 +387,7 @@ def calculate_waste():
 @app.route("/api/reset", methods=["POST"])
 def reset_report():
     db = get_db()
-    db.execute(
-        "UPDATE students SET meal_breakfast=0, meal_lunch=0, meal_dinner=0"
-    )
+    db.execute("UPDATE students SET meal_breakfast=0, meal_lunch=0, meal_dinner=0")
     db.execute("DELETE FROM scan_logs")
     db.commit()
     return jsonify({"ok": True, "message": "ሪፖርቱ ዳግም ተጀምሯል!"})
@@ -402,5 +396,3 @@ def reset_report():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=5000, debug=True)
-
-
